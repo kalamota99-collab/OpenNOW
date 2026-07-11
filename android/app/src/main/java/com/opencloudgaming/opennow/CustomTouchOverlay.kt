@@ -48,7 +48,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.serialization.Serializable
 import kotlin.math.sqrt
 
@@ -304,7 +303,7 @@ private fun androidx.compose.foundation.layout.BoxWithConstraintsScope.CustomBut
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(spec.label, fontWeight = FontWeight.Bold, color = Color.White, fontSize = androidx.compose.ui.unit.TextUnit.Unspecified.let { if (spec.sizeDp < 44f) androidx.compose.ui.unit.sp(11) else androidx.compose.ui.unit.sp(14) })
+        Text(spec.label, fontWeight = FontWeight.Bold, color = Color.White)
 
         if (editMode) {
             Box(
@@ -315,7 +314,7 @@ private fun androidx.compose.foundation.layout.BoxWithConstraintsScope.CustomBut
                     .background(Color(0xFFD32F2F))
                     .pointerInput(spec.id) { detectTapGestures(onTap = { onDelete() }) },
                 contentAlignment = Alignment.Center,
-            ) { Text("x", color = Color.White, fontWeight = FontWeight.Bold, fontSize = androidx.compose.ui.unit.sp(12)) }
+            ) { Text("x", color = Color.White, fontWeight = FontWeight.Bold) }
 
             Box(
                 Modifier
