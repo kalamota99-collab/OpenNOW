@@ -1,13 +1,19 @@
 // CustomTouchOverlay.kt
 // Drop into: android/app/src/main/java/com/opencloudgaming/opennow/
-// Same package as OpenNowScreens.kt (com.opencloudgaming.opennow) -
-// NativeStreamClient and GamepadButtonMapping are visible with no import.
+// Same package as OpenNowScreens.kt - no extra imports needed for
+// NativeStreamClient / GamepadButtonMapping.
 //
-// Replaces the fixed two-cluster layout with a fully data-driven one:
-// every button independently draggable/resizable/rebindable in edit mode.
-// Joysticks are fixed zones; the knob dynamically appears wherever you
-// first touch inside the zone. Talks to the exact same real API the
-// existing controls use - this only changes the UI layer.
+// v2 changes from the first version:
+//  - Edit mode is now fully self-contained (own visible toggle button) -
+//    it no longer depends on the app's existing layoutEditing flag, which
+//    was the reason drag/resize/add-button appeared broken before.
+//  - Joysticks are now classic fixed-base: a visible ring always sits at
+//    one fixed spot, and the knob's offset is always measured from that
+//    fixed center - not from wherever you first touched.
+//  - Button press detection uses detectTapGestures(onPress=...), which is
+//    the standard low-latency Compose press API (fixes the input delay).
+//  - Resize is now pinch-to-zoom (two-finger) via detectTransformGestures,
+//    in addition to the drag-handle for single-finger resize.
 
 package com.opencloudgaming.opennow
 
@@ -15,11 +21,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,7 +43,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -46,9 +52,7 @@ import kotlinx.serialization.Serializable
 import kotlin.math.sqrt
 
 // ---------------------------------------------------------------------------
-// Data model - add these fields to AndroidTouchSettings in Models.kt (diff
-// at the bottom of this file). @Serializable so they persist automatically
-// through the existing settings save/load system - no new storage code.
+// Data model - unchanged from v1, still goes into AndroidTouchSettings
 // ---------------------------------------------------------------------------
 
 enum class CustomButtonKind { NORMAL, TRIGGER_LEFT, TRIGGER_RIGHT }
@@ -57,23 +61,22 @@ enum class CustomButtonKind { NORMAL, TRIGGER_LEFT, TRIGGER_RIGHT }
 data class CustomButtonSpec(
     val id: String,
     val label: String,
-    val mask: Int = 0,               // ignored when kind != NORMAL
+    val mask: Int = 0,
     val kind: CustomButtonKind = CustomButtonKind.NORMAL,
-    val xPct: Float,                 // center position, 0-100 of screen width/height
+    val xPct: Float,
     val yPct: Float,
     val sizeDp: Float = 56f,
-    val shape: String = "circle",    // "circle" | "square"
+    val shape: String = "circle",
 )
 
 @Serializable
 data class CustomStickSpec(
     val id: String,
-    val isLeft: Boolean,             // true -> setVirtualLeftStick, false -> setVirtualRightStick
-    val zoneXPct: Float,
-    val zoneYPct: Float,
-    val zoneWPct: Float,
-    val zoneHPct: Float,
-    val knobRadiusDp: Float = 55f,
+    val isLeft: Boolean,
+    val centerXPct: Float,   // fixed center of the visible base ring
+    val centerYPct: Float,
+    val radiusDp: Float = 70f,   // outer ring radius
+    val knobRadiusDp: Float = 30f,
 )
 
 fun defaultCustomButtons(): List<CustomButtonSpec> = listOf(
@@ -85,10 +88,10 @@ fun defaultCustomButtons(): List<CustomButtonSpec> = listOf(
     CustomButtonSpec("rb", "RB", mask = 0x0200, xPct = 94f, yPct = 10f, sizeDp = 52f, shape = "square"),
     CustomButtonSpec("lt", "LT", kind = CustomButtonKind.TRIGGER_LEFT, xPct = 6f, yPct = 22f, sizeDp = 52f, shape = "square"),
     CustomButtonSpec("rt", "RT", kind = CustomButtonKind.TRIGGER_RIGHT, xPct = 94f, yPct = 22f, sizeDp = 52f, shape = "square"),
-    CustomButtonSpec("dup", "↑", mask = 0x0001, xPct = 14f, yPct = 68f, sizeDp = 46f, shape = "square"),
-    CustomButtonSpec("ddown", "↓", mask = 0x0002, xPct = 14f, yPct = 84f, sizeDp = 46f, shape = "square"),
-    CustomButtonSpec("dleft", "←", mask = 0x0004, xPct = 6f, yPct = 76f, sizeDp = 46f, shape = "square"),
-    CustomButtonSpec("dright", "→", mask = 0x0008, xPct = 22f, yPct = 76f, sizeDp = 46f, shape = "square"),
+    CustomButtonSpec("dup", "up", mask = 0x0001, xPct = 20f, yPct = 68f, sizeDp = 42f, shape = "square"),
+    CustomButtonSpec("ddown", "dn", mask = 0x0002, xPct = 20f, yPct = 84f, sizeDp = 42f, shape = "square"),
+    CustomButtonSpec("dleft", "lt", mask = 0x0004, xPct = 12f, yPct = 76f, sizeDp = 42f, shape = "square"),
+    CustomButtonSpec("dright", "rt", mask = 0x0008, xPct = 28f, yPct = 76f, sizeDp = 42f, shape = "square"),
     CustomButtonSpec("back", "Back", mask = 0x0020, xPct = 40f, yPct = 6f, sizeDp = 40f, shape = "square"),
     CustomButtonSpec("start", "Start", mask = 0x0010, xPct = 60f, yPct = 6f, sizeDp = 40f, shape = "square"),
     CustomButtonSpec("l3", "L3", mask = GamepadButtonMapping.LEFT_THUMB, xPct = 15f, yPct = 50f, sizeDp = 36f, shape = "square"),
@@ -96,13 +99,10 @@ fun defaultCustomButtons(): List<CustomButtonSpec> = listOf(
 )
 
 fun defaultCustomSticks(): List<CustomStickSpec> = listOf(
-    CustomStickSpec("left", isLeft = true, zoneXPct = 2f, zoneYPct = 52f, zoneWPct = 26f, zoneHPct = 38f),
-    CustomStickSpec("right", isLeft = false, zoneXPct = 72f, zoneYPct = 52f, zoneWPct = 26f, zoneHPct = 38f),
+    CustomStickSpec("left", isLeft = true, centerXPct = 15f, centerYPct = 72f),
+    CustomStickSpec("right", isLeft = false, centerXPct = 85f, centerYPct = 72f),
 )
 
-// Rebind picker options (thumb-clicks excluded - those live on dedicated
-// L3/R3 buttons above, kept separate since they're conceptually different
-// from face/shoulder/dpad buttons)
 val REBINDABLE_MASKS: List<Pair<String, Int>> = listOf(
     "A" to 0x1000, "B" to 0x2000, "X" to 0x4000, "Y" to 0x8000,
     "LB" to 0x0100, "RB" to 0x0200,
@@ -111,7 +111,7 @@ val REBINDABLE_MASKS: List<Pair<String, Int>> = listOf(
     "L3" to GamepadButtonMapping.LEFT_THUMB, "R3" to GamepadButtonMapping.RIGHT_THUMB,
 )
 
-private fun clampOffset(offset: Offset, maxRadius: Float): Offset {
+private fun clampToRadius(offset: Offset, maxRadius: Float): Offset {
     val d = sqrt(offset.x * offset.x + offset.y * offset.y)
     if (d <= maxRadius || d == 0f) return offset
     val scale = maxRadius / d
@@ -119,17 +119,17 @@ private fun clampOffset(offset: Offset, maxRadius: Float): Offset {
 }
 
 // ---------------------------------------------------------------------------
-// Main overlay
+// Main overlay - now owns its own edit-mode state
 // ---------------------------------------------------------------------------
 
 @Composable
 fun CustomTouchOverlay(
     client: NativeStreamClient,
     touch: AndroidTouchSettings,
-    editMode: Boolean,
-    onButtonTone: () -> Unit,
+    onButtonTone: (() -> Unit)? = null,
     onLayoutChange: (List<CustomButtonSpec>, List<CustomStickSpec>) -> Unit,
 ) {
+    var editMode by remember { mutableStateOf(false) }
     var buttons by remember(touch.customButtons) { mutableStateOf(touch.customButtons) }
     var sticks by remember(touch.customSticks) { mutableStateOf(touch.customSticks) }
 
@@ -172,31 +172,41 @@ fun CustomTouchOverlay(
             )
         }
 
+        // --- Self-contained edit toggle - always visible, always tappable ---
+        Surface(
+            color = if (editMode) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.45f),
+            shape = CircleShape,
+            modifier = Modifier
+                .offset(x = 10.dp, y = 10.dp)
+                .size(44.dp)
+                .pointerInput(editMode) {
+                    detectTapGestures(onTap = { editMode = !editMode })
+                },
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(if (editMode) "Done" else "Edit", color = Color.White, fontWeight = FontWeight.Bold)
+            }
+        }
+
         if (editMode) {
             Surface(
                 color = MaterialTheme.colorScheme.tertiary,
                 shape = RoundedCornerShape(999.dp),
-                modifier = Modifier.offset(x = 8.dp, y = 8.dp),
+                modifier = Modifier
+                    .offset(x = 62.dp, y = 10.dp)
+                    .pointerInput(buttons) {
+                        detectTapGestures(onTap = { pushButtons(addDefaultButton(buttons)) })
+                    },
             ) {
                 Text(
                     "+ Add Button",
                     color = MaterialTheme.colorScheme.onTertiary,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .padding(10.dp)
-                        .pointerInput(buttons) {
-                            detectTapAndAdd { pushButtons(addDefaultButton(buttons)) }
-                        },
+                    modifier = Modifier.padding(10.dp),
                 )
             }
         }
     }
-}
-
-// Small helper: a plain single-tap detector (kept separate from drag so it
-// doesn't fight with the drag gesture recognizer on the same modifier chain)
-private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.detectTapAndAdd(onTap: () -> Unit) {
-    detectTapGestures(onTap = { onTap() })
 }
 
 fun addDefaultButton(current: List<CustomButtonSpec>): List<CustomButtonSpec> {
@@ -207,7 +217,9 @@ fun addDefaultButton(current: List<CustomButtonSpec>): List<CustomButtonSpec> {
 }
 
 // ---------------------------------------------------------------------------
-// Individual button
+// Individual button - drag to move, pinch OR corner-drag to resize,
+// double-tap to rebind, trash icon to delete. Play mode uses
+// detectTapGestures(onPress=...) for immediate, low-latency press state.
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -218,15 +230,13 @@ private fun androidx.compose.foundation.layout.BoxWithConstraintsScope.CustomBut
     opacity: Float,
     maxW: Dp,
     maxH: Dp,
-    onButtonTone: () -> Unit,
+    onButtonTone: (() -> Unit)?,
     onChange: (CustomButtonSpec) -> Unit,
     onDelete: () -> Unit,
 ) {
     var pressed by remember { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
     val density = LocalDensity.current
-    val accent = MaterialTheme.colorScheme.primary
-    val idleSurface = MaterialTheme.colorScheme.surfaceVariant
     val shapeMod = if (spec.shape == "circle") CircleShape else RoundedCornerShape(10.dp)
 
     val centerX = maxW * (spec.xPct / 100f)
@@ -238,70 +248,74 @@ private fun androidx.compose.foundation.layout.BoxWithConstraintsScope.CustomBut
             .offset(x = centerX - half, y = centerY - half)
             .size(spec.sizeDp.dp)
             .clip(shapeMod)
-            .background((if (pressed) accent else idleSurface).copy(alpha = opacity))
-            .border(1.dp, accent.copy(alpha = opacity), shapeMod)
+            .background((if (pressed) Color(0xFF3F8CFF) else Color.White).copy(alpha = if (pressed) opacity.coerceAtLeast(0.5f) else opacity * 0.6f))
+            .border(1.5.dp, Color.White.copy(alpha = opacity), shapeMod)
             .then(
                 if (editMode) {
-                    Modifier.pointerInput(spec.id, maxW, maxH) {
-                        var lastTapMs = 0L
-                        detectDragGestures(
-                            onDragEnd = {
-                                val now = System.currentTimeMillis()
-                                if (now - lastTapMs < 260) showPicker = true
-                                lastTapMs = now
-                            },
-                        ) { change, dragAmount ->
-                            change.consume()
-                            val dxPct = with(density) { dragAmount.x.toDp().value } / maxW.value * 100f
-                            val dyPct = with(density) { dragAmount.y.toDp().value } / maxH.value * 100f
-                            onChange(
-                                spec.copy(
-                                    xPct = (spec.xPct + dxPct).coerceIn(2f, 98f),
-                                    yPct = (spec.yPct + dyPct).coerceIn(2f, 98f),
-                                ),
-                            )
+                    Modifier
+                        .pointerInput(spec.id, maxW, maxH) {
+                            detectTapGestures(onDoubleTap = { if (spec.kind == CustomButtonKind.NORMAL) showPicker = true })
                         }
-                    }
-                } else {
-                    Modifier.pointerInput(client, spec.id) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
-                                val down = event.changes.any { it.pressed }
-                                if (down != pressed) {
-                                    when (spec.kind) {
-                                        CustomButtonKind.NORMAL -> client.setVirtualButton(spec.mask, down)
-                                        CustomButtonKind.TRIGGER_LEFT -> client.setVirtualTrigger(true, down)
-                                        CustomButtonKind.TRIGGER_RIGHT -> client.setVirtualTrigger(false, down)
-                                    }
-                                    pressed = down
-                                    if (down) onButtonTone()
-                                }
-                                event.changes.forEach { it.consume() }
+                        .pointerInput(spec.id, maxW, maxH) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                val dxPct = with(density) { dragAmount.x.toDp().value } / maxW.value * 100f
+                                val dyPct = with(density) { dragAmount.y.toDp().value } / maxH.value * 100f
+                                onChange(
+                                    spec.copy(
+                                        xPct = (spec.xPct + dxPct).coerceIn(2f, 98f),
+                                        yPct = (spec.yPct + dyPct).coerceIn(2f, 98f),
+                                    ),
+                                )
                             }
                         }
+                        .pointerInput(spec.id) {
+                            // Two-finger pinch to resize, in addition to the
+                            // single-finger corner handle below.
+                            detectTransformGestures { _, _, zoom, _ ->
+                                if (zoom != 1f) {
+                                    onChange(spec.copy(sizeDp = (spec.sizeDp * zoom).coerceIn(28f, 160f)))
+                                }
+                            }
+                        }
+                } else {
+                    Modifier.pointerInput(client, spec.id, spec.mask, spec.kind) {
+                        detectTapGestures(
+                            onPress = {
+                                pressed = true
+                                when (spec.kind) {
+                                    CustomButtonKind.NORMAL -> client.setVirtualButton(spec.mask, true)
+                                    CustomButtonKind.TRIGGER_LEFT -> client.setVirtualTrigger(true, true)
+                                    CustomButtonKind.TRIGGER_RIGHT -> client.setVirtualTrigger(false, true)
+                                }
+                                onButtonTone?.invoke()
+                                tryAwaitRelease()
+                                pressed = false
+                                when (spec.kind) {
+                                    CustomButtonKind.NORMAL -> client.setVirtualButton(spec.mask, false)
+                                    CustomButtonKind.TRIGGER_LEFT -> client.setVirtualTrigger(true, false)
+                                    CustomButtonKind.TRIGGER_RIGHT -> client.setVirtualTrigger(false, false)
+                                }
+                            },
+                        )
                     }
                 },
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(spec.label, fontWeight = FontWeight.Bold, color = if (pressed) MaterialTheme.colorScheme.onPrimary else Color.White)
+        Text(spec.label, fontWeight = FontWeight.Bold, color = Color.White, fontSize = androidx.compose.ui.unit.TextUnit.Unspecified.let { if (spec.sizeDp < 44f) androidx.compose.ui.unit.sp(11) else androidx.compose.ui.unit.sp(14) })
 
         if (editMode) {
-            // delete handle
             Box(
                 Modifier
                     .offset(x = spec.sizeDp.dp - 10.dp, y = (-10).dp)
                     .size(22.dp)
                     .clip(CircleShape)
                     .background(Color(0xFFD32F2F))
-                    .pointerInput(spec.id) {
-                        detectTapAndAdd { onDelete() }
-                    },
+                    .pointerInput(spec.id) { detectTapGestures(onTap = { onDelete() }) },
                 contentAlignment = Alignment.Center,
-            ) { Text("x", color = Color.White, fontWeight = FontWeight.Bold) }
+            ) { Text("x", color = Color.White, fontWeight = FontWeight.Bold, fontSize = androidx.compose.ui.unit.sp(12)) }
 
-            // resize handle
             Box(
                 Modifier
                     .offset(x = spec.sizeDp.dp - 10.dp, y = spec.sizeDp.dp - 10.dp)
@@ -312,7 +326,7 @@ private fun androidx.compose.foundation.layout.BoxWithConstraintsScope.CustomBut
                         detectDragGestures { change, dragAmount ->
                             change.consume()
                             val deltaDp = with(density) { (dragAmount.x + dragAmount.y).toDp().value } / 2f
-                            onChange(spec.copy(sizeDp = (spec.sizeDp + deltaDp).coerceIn(28f, 140f)))
+                            onChange(spec.copy(sizeDp = (spec.sizeDp + deltaDp).coerceIn(28f, 160f)))
                         }
                     },
             )
@@ -330,20 +344,16 @@ private fun androidx.compose.foundation.layout.BoxWithConstraintsScope.CustomBut
     }
 }
 
-@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun RebindPicker(onPick: (Int, String) -> Unit, onDismiss: () -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.55f))
-            .pointerInput(Unit) { detectTapAndAdd { onDismiss() } },
+            .background(Color.Black.copy(alpha = 0.6f))
+            .pointerInput(Unit) { detectTapGestures(onTap = { onDismiss() }) },
         contentAlignment = Alignment.Center,
     ) {
-        Surface(
-            color = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(16.dp),
-        ) {
+        Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(16.dp)) {
             androidx.compose.foundation.layout.FlowRow(
                 modifier = Modifier.padding(16.dp),
                 horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
@@ -354,7 +364,7 @@ private fun RebindPicker(onPick: (Int, String) -> Unit, onDismiss: () -> Unit) {
                         Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .pointerInput(label) { detectTapAndAdd { onPick(mask, label) } },
+                            .pointerInput(label) { detectTapGestures(onTap = { onPick(mask, label) }) },
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(label, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), color = Color.White)
@@ -366,7 +376,9 @@ private fun RebindPicker(onPick: (Int, String) -> Unit, onDismiss: () -> Unit) {
 }
 
 // ---------------------------------------------------------------------------
-// Joystick - fixed/editable zone, knob dynamically appears at first touch
+// Joystick - classic fixed base ring, knob offset always measured from the
+// FIXED center (not from first-touch point). Drag the whole ring to
+// reposition it in edit mode; pinch or corner-drag to resize.
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -381,98 +393,95 @@ private fun androidx.compose.foundation.layout.BoxWithConstraintsScope.CustomSti
 ) {
     val density = LocalDensity.current
     var knobOffset by remember { mutableStateOf(Offset.Zero) }
-    var dynamicCenter by remember { mutableStateOf<Offset?>(null) }
 
-    val zoneX = maxW * (spec.zoneXPct / 100f)
-    val zoneY = maxH * (spec.zoneYPct / 100f)
-    val zoneW = maxW * (spec.zoneWPct / 100f)
-    val zoneH = maxH * (spec.zoneHPct / 100f)
+    val centerX = maxW * (spec.centerXPct / 100f)
+    val centerY = maxH * (spec.centerYPct / 100f)
+    val outerHalf = spec.radiusDp.dp
+    val knobHalf = (spec.knobRadiusDp).dp
 
+    // Fixed base ring - always visible, always in the same spot.
     Box(
         Modifier
-            .offset(x = zoneX, y = zoneY)
-            .size(zoneW, zoneH)
-            .clip(RoundedCornerShape(18.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (editMode) 0.35f else 0.12f))
-            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = if (editMode) 0.8f else 0.25f), RoundedCornerShape(18.dp))
+            .offset(x = centerX - outerHalf, y = centerY - outerHalf)
+            .size(outerHalf * 2)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = opacity * 0.18f))
+            .border(2.dp, Color.White.copy(alpha = opacity * 0.55f), CircleShape)
             .then(
                 if (editMode) {
-                    Modifier.pointerInput(spec.id, maxW, maxH) {
-                        detectDragGestures { change, dragAmount ->
-                            change.consume()
-                            val dxPct = with(density) { dragAmount.x.toDp().value } / maxW.value * 100f
-                            val dyPct = with(density) { dragAmount.y.toDp().value } / maxH.value * 100f
-                            onChange(
-                                spec.copy(
-                                    zoneXPct = (spec.zoneXPct + dxPct).coerceIn(0f, 100f - spec.zoneWPct),
-                                    zoneYPct = (spec.zoneYPct + dyPct).coerceIn(0f, 100f - spec.zoneHPct),
-                                ),
-                            )
+                    Modifier
+                        .pointerInput(spec.id, maxW, maxH) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                val dxPct = with(density) { dragAmount.x.toDp().value } / maxW.value * 100f
+                                val dyPct = with(density) { dragAmount.y.toDp().value } / maxH.value * 100f
+                                onChange(
+                                    spec.copy(
+                                        centerXPct = (spec.centerXPct + dxPct).coerceIn(5f, 95f),
+                                        centerYPct = (spec.centerYPct + dyPct).coerceIn(5f, 95f),
+                                    ),
+                                )
+                            }
                         }
-                    }
+                        .pointerInput(spec.id) {
+                            detectTransformGestures { _, _, zoom, _ ->
+                                if (zoom != 1f) {
+                                    onChange(spec.copy(radiusDp = (spec.radiusDp * zoom).coerceIn(40f, 130f)))
+                                }
+                            }
+                        }
                 } else {
                     Modifier.pointerInput(client, spec.id) {
-                        val maxRadiusPx = with(density) { spec.knobRadiusDp.dp.toPx() }
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
-                                val change = event.changes.firstOrNull { it.pressed }
-                                if (change == null) {
-                                    if (dynamicCenter != null) {
-                                        if (spec.isLeft) client.setVirtualLeftStick(0f, 0f) else client.setVirtualRightStick(0f, 0f)
-                                        dynamicCenter = null
-                                        knobOffset = Offset.Zero
-                                    }
-                                    continue
-                                }
-                                if (dynamicCenter == null) dynamicCenter = change.position
-                                val delta = clampOffset(change.position - dynamicCenter!!, maxRadiusPx)
-                                knobOffset = delta
-                                val nx = (delta.x / maxRadiusPx).coerceIn(-1f, 1f)
-                                val ny = (delta.y / maxRadiusPx).coerceIn(-1f, 1f)
-                                if (spec.isLeft) client.setVirtualLeftStick(nx, ny) else client.setVirtualRightStick(nx, ny)
-                                change.consume()
-                            }
+                        val maxRadiusPx = with(density) { spec.radiusDp.dp.toPx() }
+                        detectDragGestures(
+                            onDragEnd = {
+                                knobOffset = Offset.Zero
+                                if (spec.isLeft) client.setVirtualLeftStick(0f, 0f) else client.setVirtualRightStick(0f, 0f)
+                            },
+                            onDragCancel = {
+                                knobOffset = Offset.Zero
+                                if (spec.isLeft) client.setVirtualLeftStick(0f, 0f) else client.setVirtualRightStick(0f, 0f)
+                            },
+                        ) { change, dragAmount ->
+                            change.consume()
+                            val next = clampToRadius(knobOffset + dragAmount, maxRadiusPx)
+                            knobOffset = next
+                            val nx = (next.x / maxRadiusPx).coerceIn(-1f, 1f)
+                            val ny = (next.y / maxRadiusPx).coerceIn(-1f, 1f)
+                            if (spec.isLeft) client.setVirtualLeftStick(nx, ny) else client.setVirtualRightStick(nx, ny)
                         }
                     }
                 },
             ),
     ) {
-        if (!editMode && dynamicCenter != null) {
-            // dynamicCenter is in px, relative to this zone Box's own origin
-            // (pointerInput coordinates are local to the element they're
-            // attached to), so no extra zoneX/zoneY subtraction is needed.
-            val knobSizePx = with(density) { 60.dp.toPx() }
-            Box(
-                Modifier
-                    .offset(
-                        x = with(density) { (dynamicCenter!!.x + knobOffset.x - knobSizePx / 2f).toDp() },
-                        y = with(density) { (dynamicCenter!!.y + knobOffset.y - knobSizePx / 2f).toDp() },
+        // Knob - offset is always relative to the fixed center above, so a
+        // touch anywhere in the ring moves the knob from center toward it,
+        // it never "teleports" its base to your finger.
+        Box(
+            Modifier
+                .offset {
+                    androidx.compose.ui.unit.IntOffset(
+                        (outerHalf.toPx() - knobHalf.toPx() + knobOffset.x).toInt(),
+                        (outerHalf.toPx() - knobHalf.toPx() + knobOffset.y).toInt(),
                     )
-                    .size(60.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = opacity)),
-            )
-        }
+                }
+                .size(knobHalf * 2)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = (opacity * 0.9f).coerceAtMost(1f))),
+        )
 
         if (editMode) {
             Box(
                 Modifier
-                    .offset(x = zoneW - 12.dp, y = zoneH - 12.dp)
+                    .offset(x = outerHalf * 2 - 12.dp, y = outerHalf * 2 - 12.dp)
                     .size(24.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.secondary)
                     .pointerInput(spec.id) {
                         detectDragGestures { change, dragAmount ->
                             change.consume()
-                            val dwPct = with(density) { dragAmount.x.toDp().value } / maxW.value * 100f
-                            val dhPct = with(density) { dragAmount.y.toDp().value } / maxH.value * 100f
-                            onChange(
-                                spec.copy(
-                                    zoneWPct = (spec.zoneWPct + dwPct).coerceIn(10f, 60f),
-                                    zoneHPct = (spec.zoneHPct + dhPct).coerceIn(10f, 60f),
-                                ),
-                            )
+                            val deltaDp = with(density) { (dragAmount.x + dragAmount.y).toDp().value } / 2f
+                            onChange(spec.copy(radiusDp = (spec.radiusDp + deltaDp).coerceIn(40f, 130f)))
                         }
                     },
             )
