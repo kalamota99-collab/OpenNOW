@@ -7852,7 +7852,6 @@ private fun TouchOverlay(
             CustomTouchOverlay(
                 client = client,
                 touch = touch,
-                editMode = layoutEditing,
                 onButtonTone = onButtonTone,
                 onLayoutChange = { newButtons, newSticks -> },
             )
