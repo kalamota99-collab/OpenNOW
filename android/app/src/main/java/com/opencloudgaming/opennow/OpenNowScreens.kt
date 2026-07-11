@@ -7848,6 +7848,15 @@ private fun TouchOverlay(
             ),
     ) {
         if (touch.enabled) {
+        if (touch.useCustomLayout) {
+            CustomTouchOverlay(
+                client = client,
+                touch = touch,
+                editMode = layoutEditing,
+                onButtonTone = onButtonTone,
+                onLayoutChange = { newButtons, newSticks -> },
+            )
+        } else {
             val landscape = maxWidth > maxHeight
             if (landscape) {
                 LandscapeTouchControls(
@@ -7883,6 +7892,7 @@ private fun TouchOverlay(
                     onRightOffsetChange = onRightOffsetChange,
                 )
             }
+        }
         }
     }
 }
