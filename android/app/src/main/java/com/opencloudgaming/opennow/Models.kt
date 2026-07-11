@@ -166,7 +166,7 @@ data class AndroidTouchSettings(
     val leftOffsetYDp: Float = 0f,
     val rightOffsetXDp: Float = 0f,
 val rightOffsetYDp: Float = 0f,
-val useCustomLayout: Boolean = false,
+val useCustomLayout: Boolean = true,
 val customButtons: List<CustomButtonSpec> = defaultCustomButtons(),
 val customSticks: List<CustomStickSpec> = defaultCustomSticks(),
 )
