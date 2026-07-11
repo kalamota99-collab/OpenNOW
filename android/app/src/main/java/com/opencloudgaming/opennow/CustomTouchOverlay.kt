@@ -14,6 +14,8 @@ package com.opencloudgaming.opennow
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -41,7 +43,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.serialization.Serializable
-import kotlin.math.min
 import kotlin.math.sqrt
 
 // ---------------------------------------------------------------------------
@@ -195,7 +196,7 @@ fun CustomTouchOverlay(
 // Small helper: a plain single-tap detector (kept separate from drag so it
 // doesn't fight with the drag gesture recognizer on the same modifier chain)
 private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.detectTapAndAdd(onTap: () -> Unit) {
-    androidx.compose.foundation.gestures.detectTapGestures(onTap = { onTap() })
+    detectTapGestures(onTap = { onTap() })
 }
 
 fun addDefaultButton(current: List<CustomButtonSpec>): List<CustomButtonSpec> {
