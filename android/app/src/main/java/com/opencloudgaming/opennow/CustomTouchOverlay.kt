@@ -146,6 +146,7 @@ fun CustomTouchOverlay(
 
     var editPanelXPct by remember { mutableStateOf(45f) }
     var editPanelYPct by remember { mutableStateOf(5f) }
+    var editPanelDrag by remember { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current
 
     fun pushButtons(next: List<CustomButtonSpec>) {
@@ -157,7 +158,6 @@ fun CustomTouchOverlay(
         onLayoutChange(buttons, next)
     }
 
-    // Explicit Passthrough ID for the main Edit panel
     val editPassthroughId = "custom-edit-panel"
     DisposableEffect(editPassthroughId) {
         onDispose { NativeStreamInputRouter.clearTouchControllerPassthroughBound(editPassthroughId) }
@@ -197,16 +197,19 @@ fun CustomTouchOverlay(
             )
         }
 
-        // --- Draggable Edit Toggle Panel (NOW WITH PROPER PASSTHROUGH BOUNDS) ---
+        // --- Draggable Edit Toggle Panel ---
         val editPanelX = maxW * (editPanelXPct / 100f)
         val editPanelY = maxH * (editPanelYPct / 100f)
 
         Box(
             Modifier
-                .offset { IntOffset(editPanelX.toPx().roundToInt(), editPanelY.toPx().roundToInt()) }
+                .offset { 
+                    val xPx = editPanelX.toPx() + editPanelDrag.x
+                    val yPx = editPanelY.toPx() + editPanelDrag.y
+                    IntOffset(xPx.roundToInt(), yPx.roundToInt()) 
+                }
                 .zIndex(50f)
                 .onGloballyPositioned { coordinates ->
-                    // THIS FIXES THE BUG: Tells OpenNow to let you tap this UI instead of the stream
                     val bounds = coordinates.boundsInRoot()
                     NativeStreamInputRouter.setTouchControllerPassthroughBound(
                         editPassthroughId,
@@ -225,12 +228,18 @@ fun CustomTouchOverlay(
                     modifier = Modifier
                         .pointerInput(editMode, maxW, maxH, density) {
                             if (editMode) {
-                                detectDragGestures { change, dragAmount ->
+                                detectDragGestures(
+                                    onDragEnd = {
+                                        val dxPct = (editPanelDrag.x / density.density) / maxW.value * 100f
+                                        val dyPct = (editPanelDrag.y / density.density) / maxH.value * 100f
+                                        editPanelXPct = (editPanelXPct + dxPct).coerceIn(1f, 90f)
+                                        editPanelYPct = (editPanelYPct + dyPct).coerceIn(1f, 90f)
+                                        editPanelDrag = Offset.Zero
+                                    },
+                                    onDragCancel = { editPanelDrag = Offset.Zero }
+                                ) { change, dragAmount ->
                                     change.consume()
-                                    val dxPct = (dragAmount.x / density.density) / maxW.value * 100f
-                                    val dyPct = (dragAmount.y / density.density) / maxH.value * 100f
-                                    editPanelXPct = (editPanelXPct + dxPct).coerceIn(1f, 90f)
-                                    editPanelYPct = (editPanelYPct + dyPct).coerceIn(1f, 90f)
+                                    editPanelDrag += dragAmount
                                 }
                             }
                         }
@@ -297,6 +306,10 @@ private fun BoxWithConstraintsScope.CustomButton(
 ) {
     var pressed by remember { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
+    
+    // Defer visual state updates to prevent layout thrashing and stutters
+    var dragOffset by remember { mutableStateOf(Offset.Zero) }
+    var resizeDrag by remember { mutableStateOf(0f) }
 
     val density = LocalDensity.current
 
@@ -307,8 +320,9 @@ private fun BoxWithConstraintsScope.CustomButton(
         else -> CircleShape
     }
 
-    val buttonWidth = if (spec.shape == "wide_rect") spec.sizeDp.dp * 1.6f else spec.sizeDp.dp
-    val buttonHeight = if (spec.shape == "wide_rect") spec.sizeDp.dp * 0.75f else spec.sizeDp.dp
+    val activeSizeDp = (spec.sizeDp + resizeDrag).coerceIn(28f, 160f)
+    val buttonWidth = if (spec.shape == "wide_rect") activeSizeDp.dp * 1.6f else activeSizeDp.dp
+    val buttonHeight = if (spec.shape == "wide_rect") activeSizeDp.dp * 0.75f else activeSizeDp.dp
 
     val centerX = maxW * (spec.xPct / 100f)
     val centerY = maxH * (spec.yPct / 100f)
@@ -349,6 +363,7 @@ private fun BoxWithConstraintsScope.CustomButton(
             )
 
             if (editMode) {
+                // Delete handle
                 Box(
                     Modifier
                         .offset(x = buttonWidth - 10.dp, y = (-10).dp)
@@ -359,6 +374,7 @@ private fun BoxWithConstraintsScope.CustomButton(
                     contentAlignment = Alignment.Center,
                 ) { Text("x", color = Color.White, fontWeight = FontWeight.Bold) }
 
+                // Resize handle (Now updates smoothly)
                 Box(
                     Modifier
                         .offset(x = buttonWidth - 14.dp, y = buttonHeight - 14.dp)
@@ -366,10 +382,16 @@ private fun BoxWithConstraintsScope.CustomButton(
                         .clip(CircleShape)
                         .background(EditAccent)
                         .pointerInput(spec.id, density) {
-                            detectDragGestures { change, dragAmount ->
+                            detectDragGestures(
+                                onDragEnd = {
+                                    onChange(spec.copy(sizeDp = activeSizeDp))
+                                    resizeDrag = 0f
+                                },
+                                onDragCancel = { resizeDrag = 0f }
+                            ) { change, dragAmount ->
                                 change.consume()
                                 val deltaDp = ((dragAmount.x + dragAmount.y) / 2f) / density.density
-                                onChange(spec.copy(sizeDp = (spec.sizeDp + deltaDp).coerceIn(28f, 160f)))
+                                resizeDrag += deltaDp
                             }
                         },
                 )
@@ -381,8 +403,8 @@ private fun BoxWithConstraintsScope.CustomButton(
         Box(
             Modifier
                 .offset {
-                    val xPx = centerX.toPx() - halfW.toPx() - editHitMargin.toPx()
-                    val yPx = centerY.toPx() - halfH.toPx() - editHitMargin.toPx()
+                    val xPx = centerX.toPx() - halfW.toPx() - editHitMargin.toPx() + dragOffset.x
+                    val yPx = centerY.toPx() - halfH.toPx() - editHitMargin.toPx() + dragOffset.y
                     IntOffset(xPx.roundToInt(), yPx.roundToInt())
                 }
                 .size(width = buttonWidth + editHitMargin * 2, height = buttonHeight + editHitMargin * 2)
@@ -390,16 +412,22 @@ private fun BoxWithConstraintsScope.CustomButton(
                     detectTapGestures(onDoubleTap = { if (spec.kind == CustomButtonKind.NORMAL) showPicker = true })
                 }
                 .pointerInput(spec.id, maxW, maxH, density) {
-                    detectDragGestures { change, dragAmount ->
+                    detectDragGestures(
+                        onDragEnd = {
+                            val dxPct = (dragOffset.x / density.density) / maxW.value * 100f
+                            val dyPct = (dragOffset.y / density.density) / maxH.value * 100f
+                            onChange(
+                                spec.copy(
+                                    xPct = (spec.xPct + dxPct).coerceIn(2f, 98f),
+                                    yPct = (spec.yPct + dyPct).coerceIn(2f, 98f),
+                                )
+                            )
+                            dragOffset = Offset.Zero
+                        },
+                        onDragCancel = { dragOffset = Offset.Zero }
+                    ) { change, dragAmount ->
                         change.consume()
-                        val dxPct = (dragAmount.x / density.density) / maxW.value * 100f
-                        val dyPct = (dragAmount.y / density.density) / maxH.value * 100f
-                        onChange(
-                            spec.copy(
-                                xPct = (spec.xPct + dxPct).coerceIn(2f, 98f),
-                                yPct = (spec.yPct + dyPct).coerceIn(2f, 98f),
-                            ),
-                        )
+                        dragOffset += dragAmount
                     }
                 },
             contentAlignment = Alignment.Center,
@@ -534,11 +562,17 @@ private fun BoxWithConstraintsScope.CustomStick(
 ) {
     var knobOffset by remember { mutableStateOf(Offset.Zero) }
     var baseOffset by remember { mutableStateOf(Offset.Zero) }
+    
+    // Defer visual state updates to prevent layout thrashing and stutters
+    var dragOffset by remember { mutableStateOf(Offset.Zero) }
+    var resizeDrag by remember { mutableStateOf(0f) }
+    
     val density = LocalDensity.current
 
     val centerX = maxW * (spec.centerXPct / 100f)
     val centerY = maxH * (spec.centerYPct / 100f)
-    val outerDiameter = spec.radiusDp.dp * 2
+    val activeRadiusDp = (spec.radiusDp + resizeDrag).coerceIn(40f, 160f)
+    val outerDiameter = activeRadiusDp.dp * 2
     val knobDiameter = spec.knobRadiusDp.dp * 2
     val editHitMargin = 24.dp
 
@@ -573,6 +607,7 @@ private fun BoxWithConstraintsScope.CustomStick(
             )
 
             if (editMode) {
+                // Resize Handle
                 Box(
                     Modifier
                         .offset(x = outerDiameter - 14.dp, y = outerDiameter - 14.dp)
@@ -580,10 +615,16 @@ private fun BoxWithConstraintsScope.CustomStick(
                         .clip(CircleShape)
                         .background(EditAccent)
                         .pointerInput(spec.id, density) {
-                            detectDragGestures { change, dragAmount ->
+                            detectDragGestures(
+                                onDragEnd = {
+                                    onChange(spec.copy(radiusDp = activeRadiusDp))
+                                    resizeDrag = 0f
+                                },
+                                onDragCancel = { resizeDrag = 0f }
+                            ) { change, dragAmount ->
                                 change.consume()
                                 val deltaDp = ((dragAmount.x + dragAmount.y) / 2f) / density.density
-                                onChange(spec.copy(radiusDp = (spec.radiusDp + deltaDp / 2f).coerceIn(40f, 160f))) 
+                                resizeDrag += deltaDp / 2f 
                             }
                         },
                 )
@@ -595,8 +636,8 @@ private fun BoxWithConstraintsScope.CustomStick(
         Box(
             Modifier
                 .offset {
-                    val xPx = centerX.toPx() - (outerDiameter / 2).toPx() - editHitMargin.toPx()
-                    val yPx = centerY.toPx() - (outerDiameter / 2).toPx() - editHitMargin.toPx()
+                    val xPx = centerX.toPx() - (outerDiameter / 2).toPx() - editHitMargin.toPx() + dragOffset.x
+                    val yPx = centerY.toPx() - (outerDiameter / 2).toPx() - editHitMargin.toPx() + dragOffset.y
                     IntOffset(xPx.roundToInt(), yPx.roundToInt())
                 }
                 .size(outerDiameter + editHitMargin * 2)
@@ -611,16 +652,22 @@ private fun BoxWithConstraintsScope.CustomStick(
                     )
                 }
                 .pointerInput(spec.id, maxW, maxH, density) {
-                    detectDragGestures { change, dragAmount ->
+                    detectDragGestures(
+                        onDragEnd = {
+                            val dxPct = (dragOffset.x / density.density) / maxW.value * 100f
+                            val dyPct = (dragOffset.y / density.density) / maxH.value * 100f
+                            onChange(
+                                spec.copy(
+                                    centerXPct = (spec.centerXPct + dxPct).coerceIn(5f, 95f),
+                                    centerYPct = (spec.centerYPct + dyPct).coerceIn(5f, 95f),
+                                )
+                            )
+                            dragOffset = Offset.Zero
+                        },
+                        onDragCancel = { dragOffset = Offset.Zero }
+                    ) { change, dragAmount ->
                         change.consume()
-                        val dxPct = (dragAmount.x / density.density) / maxW.value * 100f
-                        val dyPct = (dragAmount.y / density.density) / maxH.value * 100f
-                        onChange(
-                            spec.copy(
-                                centerXPct = (spec.centerXPct + dxPct).coerceIn(5f, 95f),
-                                centerYPct = (spec.centerYPct + dyPct).coerceIn(5f, 95f),
-                            ),
-                        )
+                        dragOffset += dragAmount
                     }
                 },
             contentAlignment = Alignment.Center,
