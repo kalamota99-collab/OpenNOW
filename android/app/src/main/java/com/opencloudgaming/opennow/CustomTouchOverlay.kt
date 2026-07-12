@@ -40,7 +40,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -289,7 +288,7 @@ fun addDefaultButton(current: List<CustomButtonSpec>): List<CustomButtonSpec> {
 }
 
 // ---------------------------------------------------------------------------
-// Individual button implementation with Flawless Drag Logic
+// Individual button implementation with Perfect Anti-Stutter Logic
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -310,6 +309,15 @@ private fun BoxWithConstraintsScope.CustomButton(
     // Defer visual state updates to prevent layout thrashing and stutters
     var dragOffset by remember { mutableStateOf(Offset.Zero) }
     var resizeDrag by remember { mutableStateOf(0f) }
+    var lastSpec by remember { mutableStateOf(spec) }
+
+    // This completely stops the bouncing/shaking bug. It only resets local drag 
+    // variables when the Master database successfully updates and passes a new spec down.
+    if (spec != lastSpec) {
+        lastSpec = spec
+        dragOffset = Offset.Zero
+        resizeDrag = 0f
+    }
 
     val density = LocalDensity.current
 
@@ -374,7 +382,7 @@ private fun BoxWithConstraintsScope.CustomButton(
                     contentAlignment = Alignment.Center,
                 ) { Text("x", color = Color.White, fontWeight = FontWeight.Bold) }
 
-                // Resize handle (Now updates smoothly)
+                // Resize handle
                 Box(
                     Modifier
                         .offset(x = buttonWidth - 14.dp, y = buttonHeight - 14.dp)
@@ -383,10 +391,7 @@ private fun BoxWithConstraintsScope.CustomButton(
                         .background(EditAccent)
                         .pointerInput(spec.id, density) {
                             detectDragGestures(
-                                onDragEnd = {
-                                    onChange(spec.copy(sizeDp = activeSizeDp))
-                                    resizeDrag = 0f
-                                },
+                                onDragEnd = { onChange(spec.copy(sizeDp = activeSizeDp)) },
                                 onDragCancel = { resizeDrag = 0f }
                             ) { change, dragAmount ->
                                 change.consume()
@@ -422,7 +427,7 @@ private fun BoxWithConstraintsScope.CustomButton(
                                     yPct = (spec.yPct + dyPct).coerceIn(2f, 98f),
                                 )
                             )
-                            dragOffset = Offset.Zero
+                            // DragOffset NOT reset to Zero here. Let spec trigger the state flush.
                         },
                         onDragCancel = { dragOffset = Offset.Zero }
                     ) { change, dragAmount ->
@@ -547,7 +552,7 @@ private fun RebindPicker(onPick: (Int, String) -> Unit, onDismiss: () -> Unit) {
 }
 
 // ---------------------------------------------------------------------------
-// Joystick - Flawless Edit Drag & Zero Deadzone RAW Output
+// Joystick - Flawless Edit Drag & Instant Anti-Deadzone Input
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -566,6 +571,14 @@ private fun BoxWithConstraintsScope.CustomStick(
     // Defer visual state updates to prevent layout thrashing and stutters
     var dragOffset by remember { mutableStateOf(Offset.Zero) }
     var resizeDrag by remember { mutableStateOf(0f) }
+    var lastSpec by remember { mutableStateOf(spec) }
+
+    // Stops shaking/random relocations on save
+    if (spec != lastSpec) {
+        lastSpec = spec
+        dragOffset = Offset.Zero
+        resizeDrag = 0f
+    }
     
     val density = LocalDensity.current
 
@@ -616,10 +629,7 @@ private fun BoxWithConstraintsScope.CustomStick(
                         .background(EditAccent)
                         .pointerInput(spec.id, density) {
                             detectDragGestures(
-                                onDragEnd = {
-                                    onChange(spec.copy(radiusDp = activeRadiusDp))
-                                    resizeDrag = 0f
-                                },
+                                onDragEnd = { onChange(spec.copy(radiusDp = activeRadiusDp)) },
                                 onDragCancel = { resizeDrag = 0f }
                             ) { change, dragAmount ->
                                 change.consume()
@@ -662,7 +672,6 @@ private fun BoxWithConstraintsScope.CustomStick(
                                     centerYPct = (spec.centerYPct + dyPct).coerceIn(5f, 95f),
                                 )
                             )
-                            dragOffset = Offset.Zero
                         },
                         onDragCancel = { dragOffset = Offset.Zero }
                     ) { change, dragAmount ->
@@ -716,9 +725,23 @@ private fun BoxWithConstraintsScope.CustomStick(
                                 val clamped = clampToRadius(knobRaw, ringRadiusPx)
                                 knobOffset = clamped
 
-                                // ABSOLUTE 0 DEADZONE: Raw linear fraction passed directly
-                                val nx = (clamped.x / ringRadiusPx).coerceIn(-1f, 1f)
-                                val ny = (clamped.y / ringRadiusPx).coerceIn(-1f, 1f)
+                                // ABSOLUTE 0 DEADZONE w/ ANTI-DEADZONE MULTIPLIER
+                                var nx = (clamped.x / ringRadiusPx).coerceIn(-1f, 1f)
+                                var ny = (clamped.y / ringRadiusPx).coerceIn(-1f, 1f)
+                                
+                                val distance = sqrt(nx * nx + ny * ny)
+
+                                // If the finger moves even slightly, instantly bypass game deadzones
+                                if (distance > 0.001f) {
+                                    val antiDeadzone = 0.20f // Instantly send 20% input to bypass engine ignores
+                                    val sensitivity = 1.35f  // Reach 100% output with less physical travel
+                                    
+                                    val adjustedDistance = (antiDeadzone + (distance * sensitivity)).coerceIn(0f, 1f)
+                                    val factor = adjustedDistance / distance
+                                    
+                                    nx = (nx * factor).coerceIn(-1f, 1f)
+                                    ny = (ny * factor).coerceIn(-1f, 1f)
+                                }
 
                                 if (spec.isLeft) {
                                     client.setVirtualLeftStick(nx, ny)
