@@ -10,7 +10,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.BoxWithConstraintsScope
@@ -41,6 +40,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -146,7 +146,6 @@ fun CustomTouchOverlay(
 
     var editPanelXPct by remember { mutableStateOf(45f) }
     var editPanelYPct by remember { mutableStateOf(5f) }
-    var editPanelDrag by remember { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current
 
     fun pushButtons(next: List<CustomButtonSpec>) {
@@ -156,6 +155,12 @@ fun CustomTouchOverlay(
     fun pushSticks(next: List<CustomStickSpec>) {
         sticks = next
         onLayoutChange(buttons, next)
+    }
+
+    // Explicit Passthrough ID for the main Edit panel
+    val editPassthroughId = "custom-edit-panel"
+    DisposableEffect(editPassthroughId) {
+        onDispose { NativeStreamInputRouter.clearTouchControllerPassthroughBound(editPassthroughId) }
     }
 
     BoxWithConstraints(
@@ -192,17 +197,25 @@ fun CustomTouchOverlay(
             )
         }
 
+        // --- Draggable Edit Toggle Panel (NOW WITH PROPER PASSTHROUGH BOUNDS) ---
         val editPanelX = maxW * (editPanelXPct / 100f)
         val editPanelY = maxH * (editPanelYPct / 100f)
 
         Box(
             Modifier
-                .offset {
-                    val xPx = editPanelX.toPx() + editPanelDrag.x
-                    val yPx = editPanelY.toPx() + editPanelDrag.y
-                    IntOffset(xPx.roundToInt(), yPx.roundToInt())
-                }
+                .offset { IntOffset(editPanelX.toPx().roundToInt(), editPanelY.toPx().roundToInt()) }
                 .zIndex(50f)
+                .onGloballyPositioned { coordinates ->
+                    // THIS FIXES THE BUG: Tells OpenNow to let you tap this UI instead of the stream
+                    val bounds = coordinates.boundsInRoot()
+                    NativeStreamInputRouter.setTouchControllerPassthroughBound(
+                        editPassthroughId,
+                        bounds.left.roundToInt(),
+                        bounds.top.roundToInt(),
+                        bounds.right.roundToInt(),
+                        bounds.bottom.roundToInt(),
+                    )
+                }
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Surface(
@@ -212,18 +225,12 @@ fun CustomTouchOverlay(
                     modifier = Modifier
                         .pointerInput(editMode, maxW, maxH, density) {
                             if (editMode) {
-                                detectDragGestures(
-                                    onDragEnd = {
-                                        val dxPct = (editPanelDrag.x / density.density) / maxW.value * 100f
-                                        val dyPct = (editPanelDrag.y / density.density) / maxH.value * 100f
-                                        editPanelXPct = (editPanelXPct + dxPct).coerceIn(1f, 90f)
-                                        editPanelYPct = (editPanelYPct + dyPct).coerceIn(1f, 90f)
-                                        editPanelDrag = Offset.Zero
-                                    },
-                                    onDragCancel = { editPanelDrag = Offset.Zero }
-                                ) { change, dragAmount ->
+                                detectDragGestures { change, dragAmount ->
                                     change.consume()
-                                    editPanelDrag += dragAmount
+                                    val dxPct = (dragAmount.x / density.density) / maxW.value * 100f
+                                    val dyPct = (dragAmount.y / density.density) / maxH.value * 100f
+                                    editPanelXPct = (editPanelXPct + dxPct).coerceIn(1f, 90f)
+                                    editPanelYPct = (editPanelYPct + dyPct).coerceIn(1f, 90f)
                                 }
                             }
                         }
@@ -273,7 +280,7 @@ fun addDefaultButton(current: List<CustomButtonSpec>): List<CustomButtonSpec> {
 }
 
 // ---------------------------------------------------------------------------
-// Individual button implementation with Raw Pointer Tracking (No Overlaps)
+// Individual button implementation with Flawless Drag Logic
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -290,7 +297,6 @@ private fun BoxWithConstraintsScope.CustomButton(
 ) {
     var pressed by remember { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
-    var dragOffset by remember { mutableStateOf(Offset.Zero) }
 
     val density = LocalDensity.current
 
@@ -301,7 +307,6 @@ private fun BoxWithConstraintsScope.CustomButton(
         else -> CircleShape
     }
 
-    // Refined sizes for wide_rect so bumpers/triggers don't look comically large
     val buttonWidth = if (spec.shape == "wide_rect") spec.sizeDp.dp * 1.6f else spec.sizeDp.dp
     val buttonHeight = if (spec.shape == "wide_rect") spec.sizeDp.dp * 0.75f else spec.sizeDp.dp
 
@@ -310,15 +315,8 @@ private fun BoxWithConstraintsScope.CustomButton(
     val halfW = buttonWidth / 2
     val halfH = buttonHeight / 2
 
-    // Only expand hit box during edit mode. Play mode matches visual exactly to prevent touch stealing.
     val editHitMargin = 36.dp
 
-    // Register this button's on-screen bounds with the input router so taps on it
-    // aren't ALSO forwarded to the stream as touchpad/mouse input. Without this,
-    // NativeStreamInputRouter falls back to "everything below 52% of screen height
-    // counts as touch-controller UI", which misses several of the default buttons
-    // (LB/RB, LT/RT, Y, Back/Start, both sticks) and lets taps leak through as
-    // mouse clicks/movement at the same time they press the button.
     val passthroughId = "custom-btn-${spec.id}"
     DisposableEffect(passthroughId) {
         onDispose { NativeStreamInputRouter.clearTouchControllerPassthroughBound(passthroughId) }
@@ -351,7 +349,6 @@ private fun BoxWithConstraintsScope.CustomButton(
             )
 
             if (editMode) {
-                // Delete handle (top-right)
                 Box(
                     Modifier
                         .offset(x = buttonWidth - 10.dp, y = (-10).dp)
@@ -362,10 +359,6 @@ private fun BoxWithConstraintsScope.CustomButton(
                     contentAlignment = Alignment.Center,
                 ) { Text("x", color = Color.White, fontWeight = FontWeight.Bold) }
 
-                // Resize handle (bottom-right). This is the ONLY resize gesture now -
-                // it no longer competes with the reposition-drag on the button body,
-                // since that used to run detectDragGestures + detectTransformGestures
-                // on the same node and fight over the same pointer events.
                 Box(
                     Modifier
                         .offset(x = buttonWidth - 14.dp, y = buttonHeight - 14.dp)
@@ -375,11 +368,7 @@ private fun BoxWithConstraintsScope.CustomButton(
                         .pointerInput(spec.id, density) {
                             detectDragGestures { change, dragAmount ->
                                 change.consume()
-                                // Use vertical drag distance only: down-right grows, up-left shrinks.
-                                // (Previously summed x+y before converting to dp, which made the
-                                // handle grow fastest only on a diagonal and partially cancel out
-                                // on other directions.)
-                                val deltaDp = with(density) { dragAmount.y.toDp().value }
+                                val deltaDp = ((dragAmount.x + dragAmount.y) / 2f) / density.density
                                 onChange(spec.copy(sizeDp = (spec.sizeDp + deltaDp).coerceIn(28f, 160f)))
                             }
                         },
@@ -392,8 +381,8 @@ private fun BoxWithConstraintsScope.CustomButton(
         Box(
             Modifier
                 .offset {
-                    val xPx = centerX.toPx() - halfW.toPx() - editHitMargin.toPx() + dragOffset.x
-                    val yPx = centerY.toPx() - halfH.toPx() - editHitMargin.toPx() + dragOffset.y
+                    val xPx = centerX.toPx() - halfW.toPx() - editHitMargin.toPx()
+                    val yPx = centerY.toPx() - halfH.toPx() - editHitMargin.toPx()
                     IntOffset(xPx.roundToInt(), yPx.roundToInt())
                 }
                 .size(width = buttonWidth + editHitMargin * 2, height = buttonHeight + editHitMargin * 2)
@@ -401,25 +390,16 @@ private fun BoxWithConstraintsScope.CustomButton(
                     detectTapGestures(onDoubleTap = { if (spec.kind == CustomButtonKind.NORMAL) showPicker = true })
                 }
                 .pointerInput(spec.id, maxW, maxH, density) {
-                    // Single-finger drag repositions the button. Resizing now lives
-                    // exclusively on the corner handle above, so this no longer races
-                    // against a transform-gesture detector on the same node.
-                    detectDragGestures(
-                        onDragEnd = {
-                            val dxPct = (dragOffset.x / density.density) / maxW.value * 100f
-                            val dyPct = (dragOffset.y / density.density) / maxH.value * 100f
-                            onChange(
-                                spec.copy(
-                                    xPct = (spec.xPct + dxPct).coerceIn(2f, 98f),
-                                    yPct = (spec.yPct + dyPct).coerceIn(2f, 98f),
-                                ),
-                            )
-                            dragOffset = Offset.Zero
-                        },
-                        onDragCancel = { dragOffset = Offset.Zero }
-                    ) { change, dragAmount ->
+                    detectDragGestures { change, dragAmount ->
                         change.consume()
-                        dragOffset += dragAmount
+                        val dxPct = (dragAmount.x / density.density) / maxW.value * 100f
+                        val dyPct = (dragAmount.y / density.density) / maxH.value * 100f
+                        onChange(
+                            spec.copy(
+                                xPct = (spec.xPct + dxPct).coerceIn(2f, 98f),
+                                yPct = (spec.yPct + dyPct).coerceIn(2f, 98f),
+                            ),
+                        )
                     }
                 },
             contentAlignment = Alignment.Center,
@@ -434,7 +414,6 @@ private fun BoxWithConstraintsScope.CustomButton(
                     val yPx = centerY.toPx() - halfH.toPx()
                     IntOffset(xPx.roundToInt(), yPx.roundToInt())
                 }
-                // Size matches visuals EXACTLY. No overlap to steal touches.
                 .size(width = buttonWidth, height = buttonHeight)
                 .pointerInput(client, spec.id, spec.mask, spec.kind) {
                     awaitPointerEventScope {
@@ -452,7 +431,7 @@ private fun BoxWithConstraintsScope.CustomButton(
                             var event = awaitPointerEvent()
                             var change = event.changes.firstOrNull { it.id == pointerId }
                             while (change != null && change.pressed) {
-                                change.consume() // Confirms input without snapping off if rolled
+                                change.consume() 
                                 event = awaitPointerEvent()
                                 change = event.changes.firstOrNull { it.id == pointerId }
                             }
@@ -483,10 +462,6 @@ private fun BoxWithConstraintsScope.CustomButton(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Rebind picker (was cut off in the original file - completed here)
-// ---------------------------------------------------------------------------
-
 @Composable
 private fun RebindPicker(onPick: (Int, String) -> Unit, onDismiss: () -> Unit) {
     Box(
@@ -505,7 +480,6 @@ private fun RebindPicker(onPick: (Int, String) -> Unit, onDismiss: () -> Unit) {
             border = BorderStroke(1.dp, ButtonBorder.copy(alpha = 0.4f)),
             modifier = Modifier
                 .padding(24.dp)
-                // Swallow taps so tapping inside the card doesn't fall through to onDismiss.
                 .pointerInput(Unit) { detectTapGestures(onTap = {}) },
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -545,7 +519,7 @@ private fun RebindPicker(onPick: (Int, String) -> Unit, onDismiss: () -> Unit) {
 }
 
 // ---------------------------------------------------------------------------
-// Custom stick (was referenced but missing from the original file - added here)
+// Joystick - Flawless Edit Drag & Zero Deadzone RAW Output
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -559,10 +533,7 @@ private fun BoxWithConstraintsScope.CustomStick(
     onChange: (CustomStickSpec) -> Unit,
 ) {
     var knobOffset by remember { mutableStateOf(Offset.Zero) }
-    // How far the ring's visual center has recentered from its resting spot, in px.
-    // Zero when at rest; set on touch-down, reset to zero on release.
     var baseOffset by remember { mutableStateOf(Offset.Zero) }
-    var editDragOffset by remember { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current
 
     val centerX = maxW * (spec.centerXPct / 100f)
@@ -571,15 +542,9 @@ private fun BoxWithConstraintsScope.CustomStick(
     val knobDiameter = spec.knobRadiusDp.dp * 2
     val editHitMargin = 24.dp
 
-    // The dynamic "tap anywhere near here and it recenters" zone is bigger than the
-    // visible ring (see the play-mode branch below). Hoisted here so both branches
-    // and the passthrough-bounds registration agree on the same tappable footprint.
     val zoneRadiusDp = spec.radiusDp * 1.8f
     val zoneDiameter = zoneRadiusDp.dp * 2
 
-    // Register this stick's tappable zone with the input router so drags on it
-    // aren't ALSO forwarded to the stream as touchpad/mouse input (same reasoning
-    // as the buttons above).
     val passthroughId = "custom-stick-${spec.id}"
     DisposableEffect(passthroughId) {
         onDispose { NativeStreamInputRouter.clearTouchControllerPassthroughBound(passthroughId) }
@@ -591,7 +556,6 @@ private fun BoxWithConstraintsScope.CustomStick(
             Modifier.size(outerDiameter),
             contentAlignment = Alignment.Center,
         ) {
-            // Outer ring
             Box(
                 Modifier
                     .size(outerDiameter)
@@ -599,7 +563,6 @@ private fun BoxWithConstraintsScope.CustomStick(
                     .background(ButtonFill.copy(alpha = opacity * 0.18f))
                     .border(1.5.dp, ButtonBorder.copy(alpha = opacity.coerceAtLeast(0.3f)), CircleShape),
             )
-            // Knob
             Box(
                 Modifier
                     .offset { IntOffset(knobOffset.x.roundToInt(), knobOffset.y.roundToInt()) }
@@ -608,16 +571,32 @@ private fun BoxWithConstraintsScope.CustomStick(
                     .background(ButtonFill.copy(alpha = opacity * 0.55f))
                     .border(1.5.dp, ButtonBorder.copy(alpha = opacity.coerceAtLeast(0.5f)), CircleShape),
             )
+
+            if (editMode) {
+                Box(
+                    Modifier
+                        .offset(x = outerDiameter - 14.dp, y = outerDiameter - 14.dp)
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(EditAccent)
+                        .pointerInput(spec.id, density) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                val deltaDp = ((dragAmount.x + dragAmount.y) / 2f) / density.density
+                                onChange(spec.copy(radiusDp = (spec.radiusDp + deltaDp / 2f).coerceIn(40f, 160f))) 
+                            }
+                        },
+                )
+            }
         }
     }
 
     if (editMode) {
-        // Move the whole stick around the layout.
         Box(
             Modifier
                 .offset {
-                    val xPx = centerX.toPx() - (outerDiameter / 2).toPx() - editHitMargin.toPx() + editDragOffset.x
-                    val yPx = centerY.toPx() - (outerDiameter / 2).toPx() - editHitMargin.toPx() + editDragOffset.y
+                    val xPx = centerX.toPx() - (outerDiameter / 2).toPx() - editHitMargin.toPx()
+                    val yPx = centerY.toPx() - (outerDiameter / 2).toPx() - editHitMargin.toPx()
                     IntOffset(xPx.roundToInt(), yPx.roundToInt())
                 }
                 .size(outerDiameter + editHitMargin * 2)
@@ -632,32 +611,16 @@ private fun BoxWithConstraintsScope.CustomStick(
                     )
                 }
                 .pointerInput(spec.id, maxW, maxH, density) {
-                    detectDragGestures(
-                        onDragEnd = {
-                            val dxPct = (editDragOffset.x / density.density) / maxW.value * 100f
-                            val dyPct = (editDragOffset.y / density.density) / maxH.value * 100f
-                            onChange(
-                                spec.copy(
-                                    centerXPct = (spec.centerXPct + dxPct).coerceIn(5f, 95f),
-                                    centerYPct = (spec.centerYPct + dyPct).coerceIn(5f, 95f),
-                                ),
-                            )
-                            editDragOffset = Offset.Zero
-                        },
-                        onDragCancel = { editDragOffset = Offset.Zero }
-                    ) { change, dragAmount ->
+                    detectDragGestures { change, dragAmount ->
                         change.consume()
-                        editDragOffset += dragAmount
-                    }
-                }
-                .pointerInput(spec.id, density) {
-                    // Pinch-resize the radius. This box is edit-mode-only and has no
-                    // competing drag/tap detector for button rebinding, so there's no
-                    // gesture-arbitration conflict here.
-                    detectTransformGestures { _, _, zoom, _ ->
-                        if (zoom != 1f) {
-                            onChange(spec.copy(radiusDp = (spec.radiusDp * zoom).coerceIn(40f, 160f)))
-                        }
+                        val dxPct = (dragAmount.x / density.density) / maxW.value * 100f
+                        val dyPct = (dragAmount.y / density.density) / maxH.value * 100f
+                        onChange(
+                            spec.copy(
+                                centerXPct = (spec.centerXPct + dxPct).coerceIn(5f, 95f),
+                                centerYPct = (spec.centerYPct + dyPct).coerceIn(5f, 95f),
+                            ),
+                        )
                     }
                 },
             contentAlignment = Alignment.Center,
@@ -665,14 +628,6 @@ private fun BoxWithConstraintsScope.CustomStick(
             VisualStick()
         }
     } else {
-        // Fixed-zone, dynamic-recenter stick: it rests at spec's normal position
-        // (same as before), but the touch zone is larger than the visible ring.
-        // Touch down anywhere in that zone and the ring recenters under your
-        // thumb (clamped so it never leaves the zone), then acts like a normal
-        // stick from there. On release it snaps back to its resting spot.
-        // Zone scales with the ring size, so resizing the stick in edit mode
-        // resizes its dynamic zone too. Tweak the 1.8f multiplier to make the
-        // "anywhere I tap" area bigger or smaller.
         Box(
             Modifier
                 .offset {
@@ -702,7 +657,6 @@ private fun BoxWithConstraintsScope.CustomStick(
                             val down = awaitFirstDown(requireUnconsumed = false)
                             val pointerId = down.id
 
-                            // Recenter the ring under the finger, clamped to stay inside the zone.
                             val downRaw = down.position - zoneCenterPx
                             baseOffset = clampToRadius(downRaw, maxBaseOffsetPx)
 
@@ -714,12 +668,11 @@ private fun BoxWithConstraintsScope.CustomStick(
                                 val knobRaw = change.position - ringCenterPx
                                 val clamped = clampToRadius(knobRaw, ringRadiusPx)
                                 knobOffset = clamped
+
+                                // ABSOLUTE 0 DEADZONE: Raw linear fraction passed directly
                                 val nx = (clamped.x / ringRadiusPx).coerceIn(-1f, 1f)
                                 val ny = (clamped.y / ringRadiusPx).coerceIn(-1f, 1f)
-                                // NativeStreamClient exposes two separate setters rather than
-                                // one generic setVirtualStick(isLeft, x, y). Both already apply
-                                // their own deadzone/Y-negation, and expect Y in the same
-                                // positive-down screen convention we compute here.
+
                                 if (spec.isLeft) {
                                     client.setVirtualLeftStick(nx, ny)
                                 } else {
@@ -730,7 +683,7 @@ private fun BoxWithConstraintsScope.CustomStick(
                             }
 
                             knobOffset = Offset.Zero
-                            baseOffset = Offset.Zero // snap the ring back to its resting spot
+                            baseOffset = Offset.Zero 
                             if (spec.isLeft) {
                                 client.setVirtualLeftStick(0f, 0f)
                             } else {
