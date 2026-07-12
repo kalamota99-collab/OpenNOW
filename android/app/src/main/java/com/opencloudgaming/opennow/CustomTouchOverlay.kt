@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +41,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -310,11 +313,32 @@ private fun BoxWithConstraintsScope.CustomButton(
     // Only expand hit box during edit mode. Play mode matches visual exactly to prevent touch stealing.
     val editHitMargin = 36.dp
 
+    // Register this button's on-screen bounds with the input router so taps on it
+    // aren't ALSO forwarded to the stream as touchpad/mouse input. Without this,
+    // NativeStreamInputRouter falls back to "everything below 52% of screen height
+    // counts as touch-controller UI", which misses several of the default buttons
+    // (LB/RB, LT/RT, Y, Back/Start, both sticks) and lets taps leak through as
+    // mouse clicks/movement at the same time they press the button.
+    val passthroughId = "custom-btn-${spec.id}"
+    DisposableEffect(passthroughId) {
+        onDispose { NativeStreamInputRouter.clearTouchControllerPassthroughBound(passthroughId) }
+    }
+
     @Composable
     fun VisualButton() {
         Box(
             Modifier
                 .size(width = buttonWidth, height = buttonHeight)
+                .onGloballyPositioned { coordinates ->
+                    val bounds = coordinates.boundsInRoot()
+                    NativeStreamInputRouter.setTouchControllerPassthroughBound(
+                        passthroughId,
+                        bounds.left.roundToInt(),
+                        bounds.top.roundToInt(),
+                        bounds.right.roundToInt(),
+                        bounds.bottom.roundToInt(),
+                    )
+                }
                 .clip(shapeMod)
                 .background(ButtonFill.copy(alpha = if (pressed) opacity * 0.6f else opacity * 0.25f))
                 .border(1.5.dp, ButtonBorder.copy(alpha = opacity.coerceAtLeast(0.35f)), shapeMod),
@@ -547,6 +571,20 @@ private fun BoxWithConstraintsScope.CustomStick(
     val knobDiameter = spec.knobRadiusDp.dp * 2
     val editHitMargin = 24.dp
 
+    // The dynamic "tap anywhere near here and it recenters" zone is bigger than the
+    // visible ring (see the play-mode branch below). Hoisted here so both branches
+    // and the passthrough-bounds registration agree on the same tappable footprint.
+    val zoneRadiusDp = spec.radiusDp * 1.8f
+    val zoneDiameter = zoneRadiusDp.dp * 2
+
+    // Register this stick's tappable zone with the input router so drags on it
+    // aren't ALSO forwarded to the stream as touchpad/mouse input (same reasoning
+    // as the buttons above).
+    val passthroughId = "custom-stick-${spec.id}"
+    DisposableEffect(passthroughId) {
+        onDispose { NativeStreamInputRouter.clearTouchControllerPassthroughBound(passthroughId) }
+    }
+
     @Composable
     fun VisualStick() {
         Box(
@@ -583,6 +621,16 @@ private fun BoxWithConstraintsScope.CustomStick(
                     IntOffset(xPx.roundToInt(), yPx.roundToInt())
                 }
                 .size(outerDiameter + editHitMargin * 2)
+                .onGloballyPositioned { coordinates ->
+                    val bounds = coordinates.boundsInRoot()
+                    NativeStreamInputRouter.setTouchControllerPassthroughBound(
+                        passthroughId,
+                        bounds.left.roundToInt(),
+                        bounds.top.roundToInt(),
+                        bounds.right.roundToInt(),
+                        bounds.bottom.roundToInt(),
+                    )
+                }
                 .pointerInput(spec.id, maxW, maxH, density) {
                     detectDragGestures(
                         onDragEnd = {
@@ -625,9 +673,6 @@ private fun BoxWithConstraintsScope.CustomStick(
         // Zone scales with the ring size, so resizing the stick in edit mode
         // resizes its dynamic zone too. Tweak the 1.8f multiplier to make the
         // "anywhere I tap" area bigger or smaller.
-        val zoneRadiusDp = spec.radiusDp * 1.8f
-        val zoneDiameter = zoneRadiusDp.dp * 2
-
         Box(
             Modifier
                 .offset {
@@ -636,6 +681,16 @@ private fun BoxWithConstraintsScope.CustomStick(
                     IntOffset(xPx.roundToInt(), yPx.roundToInt())
                 }
                 .size(zoneDiameter)
+                .onGloballyPositioned { coordinates ->
+                    val bounds = coordinates.boundsInRoot()
+                    NativeStreamInputRouter.setTouchControllerPassthroughBound(
+                        passthroughId,
+                        bounds.left.roundToInt(),
+                        bounds.top.roundToInt(),
+                        bounds.right.roundToInt(),
+                        bounds.bottom.roundToInt(),
+                    )
+                }
                 .pointerInput(client, spec.id, spec.isLeft, spec.radiusDp) {
                     val ringRadiusPx = spec.radiusDp.dp.toPx()
                     val zoneRadiusPx = zoneRadiusDp.dp.toPx()
